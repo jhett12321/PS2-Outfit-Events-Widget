@@ -1,0 +1,326 @@
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js"></script>
+<style type="text/css">
+body,td,th {
+	color: #FFFFFF;
+}
+body {
+	background-color: #1C202B;
+}
+</style>
+
+
+<div id="characterEvents" style="display:none;">
+	<h4 style="border-top: 1px solid #166978; border-bottom: 1px solid #166978; padding-left: 5px"> Events Feed </h4>
+	<div id="ps2feed" style="height: 200px; overflow-y:scroll; border: 1px solid #166978; padding: 5px">
+	</div><br />
+	<div id="options">
+		<input type="checkbox" id="br" value="br" checked> Promotions
+		<input type="checkbox" id="unlocks" value="unlocks" checked> Unlocks
+		<input type="checkbox" id="logins" value="logins" checked> Logins
+		<input type="checkbox" id="combat" value="combat" checked> Combat
+		<input type="checkbox" id="vcombat" value="vcombat" checked> Vehicle Combat
+	</div>
+</div>
+
+<script>
+$(document).ready(function()
+{
+	if(("WebSocket" in window))
+	{
+		//The user has WebSockets
+		document.getElementById("characterEvents").style.display = "inline";
+		Connect();
+	}
+});
+
+function GetPrefix(factionid,outfitTag)
+{
+	string = '';
+	switch(factionid)
+	{
+		case "1":
+			string = '<span style="color:rgb(102,0,255)">';
+			break;
+		case "2":
+			string = '<span style="color:rgb(0,102,255)">';
+			break;
+		case "3":
+			string = '<span style="color:rgb(255,0,0)">';
+			break;
+	}
+	
+	if(outfitTag != null && outfitTag != "")
+	{
+		string += "[" + outfitTag + "] ";
+	}
+	return string;
+}
+
+function Connect()
+{
+	var outfitAlias = "TCFB"; 			//Outfit Tag. Used to retrieve an outfit character list, and used in the combat log entries.
+	var serviceID = "example"; 			//Service ID. Required to connect to the SOE Event API.
+	var factionID = "1"; 				//Faction ID (1=VS,2=NC,3=TR) Used for colour coding combat entries.
+	
+	var characters = {};
+
+	var friendlyPrefix = GetPrefix(factionID,outfitAlias);
+	var weaponPrefix = '<span style="color:rgb(204,204,204)">';
+	var suffix = '</span>'
+	
+	$.ajax({
+		url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/outfit/?alias=" + outfitAlias + "&c:show=outfit_id,alias&c:resolve=member_character(name.first,character_id)",
+		dataType: 'jsonp',
+		success: function(data)
+		{
+			if(data.outfit_list[0].members != null)
+			{
+				$.each(data.outfit_list[0].members, function()
+				{
+					characters[this.character_id] = this.name.first;
+				}
+				);
+				
+				var characterIds = Object.keys(characters);
+				var eventQuery = '"' + characterIds.join('","') + '"';
+				
+				var socket;
+				var host = "wss://push.planetside2.com/streaming?service-id=s:" + serviceID;
+				
+				try
+				{
+					var socket = new WebSocket(host);
+					
+					socket.onopen = function()
+					{
+						socket.send('{"service":"event","action":"subscribe","characters":[' + eventQuery + '],"eventNames":["BattleRankUp","Death","ItemAdded","PlayerLogin","PlayerLogout","VehicleDestroy"]}');
+					}
+					
+					socket.onmessage = function(message)
+					{
+						var eventData = $.parseJSON(message.data);
+						if(eventData.payload != null)
+						{
+							var eventPayload = eventData.payload;
+							var eventType = eventPayload.event_name;
+							var zoneId = eventPayload.zone_id;
+							
+							if(zoneId != "96" && zoneId != "97" && zoneId != "98")
+							{
+								//Rank-Up
+								if(document.getElementById("br").checked && eventType == "BattleRankUp")
+								{
+									logMessage('<span style="color:#00FF00; font-weight:bold">' + characters[eventPayload.character_id] + " is now Battle Rank " + eventPayload.battle_rank + '</span>');
+								}
+								
+								//Unlocks
+								else if(document.getElementById("unlocks").checked && eventType == "ItemAdded")
+								{
+									var itemId = eventPayload.item_id;
+									$.ajax({
+										url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/item?item_id=" + itemId + "&c:show=name.en",
+										dataType: 'jsonp',
+										success: function(data)
+										{
+											var itemName = data.item_list[0].name.en;
+										
+											logMessage(characters[eventPayload.character_id] + " unlocked " + itemName);
+										}
+									});
+								}
+								
+								//Logins
+								else if(document.getElementById("logins").checked && eventType == "PlayerLogin")
+								{
+									logMessage('<span style="font-weight:bold">' + characters[eventPayload.character_id] + " Logged In.</span>");
+								}
+								
+								else if(document.getElementById("logins").checked && eventType == "PlayerLogout")
+								{
+									logMessage('<span style="font-weight:bold">' + characters[eventPayload.character_id] + " Logged Out.</span>");
+								}
+								
+								//Combat
+								else if(document.getElementById("combat").checked && eventType == "Death")
+								{
+									if(eventPayload.character_id in characters)
+									{
+										if(eventPayload.attacker_character_id == null || (eventPayload.attacker_character_id == eventPayload.character_id))
+										{
+											logMessage(weaponPrefix + " [Suicide] " + suffix + friendlyPrefix + characters[eventPayload.character_id] + suffix);
+										}
+										else
+										{
+											$.ajax({
+												url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/character?character_id=" + eventPayload.attacker_character_id + "&c:show=name.first,faction_id,character_id&c:join=outfit_member_extended^on:character_id^to:character_id^show:alias",
+												dataType: 'jsonp',
+												success: function(data)
+												{
+													var enemyFactionId = data.character_list[0].faction_id
+													if(data.character_list[0].character_id_join_outfit_member_extended != null)
+													{
+														var alias = data.character_list[0].character_id_join_outfit_member_extended.alias;
+														var enemyPrefix = GetPrefix(enemyFactionId, alias);
+													}
+													else
+													{
+														var enemyPrefix = GetPrefix(enemyFactionId, "");
+													}
+													
+													var characterName = data.character_list[0].name.first;
+													
+													if(eventPayload.attacker_weapon_id == null)
+													{
+														logMessage(enemyPrefix + characterName + suffix + weaponPrefix + " [Killed] " + suffix + friendlyPrefix + characters[eventPayload.character_id] + suffix);
+													}
+													else
+													{
+														$.ajax({
+														url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/item?item_id=" + eventPayload.attacker_weapon_id + "&c:show=name.en",
+														dataType: 'jsonp',
+														success: function(data)
+														{
+															if(data.item_list[0] != null)
+															{
+																var weaponName = data.item_list[0].name.en;
+																logMessage(enemyPrefix + characterName + suffix + weaponPrefix + " [" + weaponName + "] " + suffix + friendlyPrefix + characters[eventPayload.character_id] + suffix);
+															}
+															else
+															{
+																$.ajax({
+																	url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/vehicle?vehicle_id=" + eventPayload.attacker_vehicle_id + "&c:show=name.en",
+																	dataType: 'jsonp',
+																	success: function(data)
+																	{
+																		var weaponName = data.vehicle_list[0].name.en;
+																		logMessage(enemyPrefix + characterName + suffix + weaponPrefix + " [" + weaponName + "] " + suffix + friendlyPrefix + characters[eventPayload.character_id] + suffix);
+																	}
+																});
+															}
+														}
+														});
+													}
+												}
+											});
+										}
+									}
+									else if(eventPayload.attacker_character_id != null && eventPayload.attacker_character_id in characters)
+									{
+										$.ajax({
+											url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/character?character_id=" + eventPayload.character_id + "&c:show=name.first,faction_id,character_id&c:join=outfit_member_extended^on:character_id^to:character_id^show:alias",
+											dataType: 'jsonp',
+											success: function(data)
+											{
+												var enemyFactionId = data.character_list[0].faction_id
+												if(data.character_list[0].character_id_join_outfit_member_extended != null)
+												{
+													var alias = data.character_list[0].character_id_join_outfit_member_extended.alias;
+													var enemyPrefix = GetPrefix(enemyFactionId, alias);
+												}
+												else
+												{
+													var enemyPrefix = GetPrefix(enemyFactionId, "");
+												}
+												
+												var characterName = data.character_list[0].name.first;
+												
+												if(eventPayload.attacker_weapon_id == null)
+												{
+													logMessage(friendlyPrefix + characters[eventPayload.attacker_character_id] + suffix + weaponPrefix + " [Killed] " + suffix + enemyPrefix + characterName + suffix);
+												}
+												else
+												{
+													$.ajax({
+													url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/item?item_id=" + eventPayload.attacker_weapon_id + "&c:show=name.en",
+													dataType: 'jsonp',
+													success: function(data)
+													{
+														if(data.item_list[0] != null)
+														{
+															var weaponName = data.item_list[0].name.en;
+															logMessage(friendlyPrefix + characters[eventPayload.attacker_character_id] + suffix + weaponPrefix + " [" + weaponName + "] " + suffix + enemyPrefix + characterName + suffix);
+														}
+														else
+														{
+															$.ajax({
+																url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/vehicle?vehicle_id=" + eventPayload.attacker_vehicle_id + "&c:show=name.en",
+																dataType: 'jsonp',
+																success: function(data)
+																{
+																	var weaponName = data.vehicle_list[0].name.en;
+																	logMessage(friendlyPrefix + characters[eventPayload.attacker_character_id] + suffix + weaponPrefix + " [" + weaponName + "] " + suffix + enemyPrefix + characterName + suffix);
+																}
+															});
+														}
+													}
+													});
+												}
+											}
+										});
+									}
+								}
+								
+								else if(document.getElementById("vcombat").checked && eventType == "VehicleDestroy")
+								{
+									$.ajax({
+										url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/vehicle?vehicle_id=" + eventPayload.vehicle_id + "&c:show=name.en",
+										dataType: 'jsonp',
+										success: function(data)
+										{
+											var vehicleName = data.vehicle_list[0].name.en;
+											
+											if(eventPayload.character_id in characters)
+											{
+												if(eventPayload.attacker_character_id == null || (eventPayload.attacker_character_id == eventPayload.character_id))
+												{
+													logMessage(characters[eventPayload.character_id] + "'s " + vehicleName + " was Swallowed by a Tree.");
+												}
+												else
+												{
+													$.ajax({
+														url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/character?character_id=" + eventPayload.attacker_character_id + "&c:show=name.first",
+														dataType: 'jsonp',
+														success: function(data)
+														{
+															var characterName = data.character_list[0].name.first;
+															
+															logMessage(characters[eventPayload.character_id] + "'s " + vehicleName + " was destroyed by " + characterName);
+														}
+													});
+												}
+											}
+											else if(eventPayload.attacker_character_id != null && eventPayload.attacker_character_id in characters)
+											{
+												$.ajax({
+													url: "https://census.soe.com/s:" + serviceID + "/get/ps2:v2/character?character_id=" + eventPayload.character_id + "&c:show=name.first",
+													dataType: 'jsonp',
+													success: function(data)
+													{
+														var characterName = data.character_list[0].name.first;
+														logMessage(characters[eventPayload.attacker_character_id] + " destroyed " + characterName + "'s " + vehicleName);
+													}
+												});
+											}
+										}
+									});
+								}
+							}
+						}
+					}
+				}
+				catch(exception)
+				{
+					console.log(exception);
+				}
+			}
+		}
+	});
+}
+
+function logMessage(str)
+{
+	var feed = document.getElementById("ps2feed");
+	feed.innerHTML = str + "<br>" + feed.innerHTML;
+}
+
+</script>
